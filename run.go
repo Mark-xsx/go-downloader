@@ -4,6 +4,8 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -18,10 +20,20 @@ type Result struct {
 func run() error {
 	urlsFlag := flag.String("u", "", "要下载的URL，多个用逗号分隔")
 	outDir := flag.String("d", ".", "保存目录")
+	concurrent := flag.Int("c", 3, "最大并发数")
 	flag.Parse()
 
 	if *urlsFlag == "" {
-		return fmt.Errorf("用法：go run . -u <url1>,<url2>,<url3>")
+		return fmt.Errorf("用法：go run . -u <url1>,<url2> [-c 3]")
+	}
+
+	maxConc := *concurrent
+	if maxConc < 1 {
+		maxConc = 1
+	}
+
+	if err := os.MkdirAll(*outDir, 0o755); err != nil {
+		return fmt.Errorf("创建输出目录%s失败：%w", *outDir, err)
 	}
 
 	urls := strings.Split(*urlsFlag, ",")
@@ -33,8 +45,7 @@ func run() error {
 	results := make([]Result, len(urls))
 	var wg sync.WaitGroup
 
-	maxConcurrent := 3
-	sem := make(chan struct{}, maxConcurrent)
+	sem := make(chan struct{}, maxConc)
 
 	for i, rawURL := range urls {
 		rawURL = strings.TrimSpace(rawURL)
@@ -48,7 +59,7 @@ func run() error {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			outPath := fmt.Sprintf("%s/out_%d", *outDir, index+1)
+			outPath := filepath.Join(*outDir, fmt.Sprintf("out_%d", index+1))
 			fmt.Printf("[%d]正在下载：%s\n", index+1, u)
 
 			n, err := download(client, u, outPath)
@@ -68,7 +79,7 @@ func run() error {
 			continue
 		}
 		if res.Err != nil {
-			fmt.Printf("失败：%s(原因:%v)\n)", res.URL, res.Err)
+			fmt.Printf("失败：%s(原因:%v)\n", res.URL, res.Err)
 			failCount++
 		} else {
 			fmt.Printf("成功：%s(%d字节)\n", res.URL, res.Bytes)

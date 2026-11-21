@@ -19,18 +19,30 @@ func download(client *http.Client, rawURL, outPath string) (int64, error) {
 	if resp.StatusCode != http.StatusOK {
 		return 0, fmt.Errorf("状态码异常：%d", resp.StatusCode)
 	}
-	f, err := os.Create(outPath)
+
+	tmpPath := outPath + ".part"
+	f, err := os.Create(tmpPath)
 	if err != nil {
 		return 0, fmt.Errorf("创建文件失败：%w", err)
 	}
-	defer f.Close()
 
 	n, err := io.Copy(f, resp.Body)
 	if err != nil {
 		f.Close()
-		os.Remove(outPath)
+		os.Remove(tmpPath)
 		return n, fmt.Errorf("写入失败:%w", err)
 	}
+
+	if err := f.Close(); err != nil {
+		os.Remove(tmpPath)
+		return n, fmt.Errorf("文件；落盘失败：%w", err)
+	}
+
+	if err := os.Rename(tmpPath, outPath); err != nil {
+		os.Remove(tmpPath)
+		return n, fmt.Errorf("重命名失败：%w", err)
+	}
+
 	return n, nil
 
 }
