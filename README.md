@@ -1,28 +1,50 @@
+
 # Go Downloader
 
-一个使用 Go 语言编写的轻量级、高并发文件下载器。
+一个使用 Go 语言编写的高并发、生产级文件下载器。具备协程池调度、断点续传、指数退避重试、限速控制及优雅退出等工业级特性。
 
 ## ✨ 核心特性
 
-- **多任务并发**：基于 `goroutine` 与 `sync.WaitGroup` 实现多 URL 并发下载。
-- **精准限流控制**：使用带缓冲的 `channel` 实现信号量（Semaphore），可通过 `-c` 参数控制最大并发数，防止文件句柄耗尽。
-- **数据安全保护**：引入 `.part` 临时文件机制。下载完成且落盘成功后才原子重命名，避免下载失败破坏用户原有同名文件。
-- **优雅的错误处理**：单个任务失败不会影响其他任务（降级容错），并统一进行错误统计与报告。
-- **跨平台兼容**：使用 `filepath.Join` 拼接路径，完美兼容 Linux/Windows/macOS。
+- **🚀 高并发与 Worker Pool**：基于固定数量的 Worker 池和 `goroutine` 实现并发下载，无论任务量多大，内存占用恒定。
+- **⏸️ 断点续传**：基于 `.part` 临时文件与 HTTP `Range` 请求，网络中断或手动暂停后，重新运行可瞬间从断点继续下载。
+- **⚡ 指数退避重试**：精准区分错误类型。针对 5xx 服务端错误和网络超时，采用 1s/2s/4s 的指数退避重试；针对 404 等客户端错误直接秒退，不浪费资源。
+- **⏳ 令牌桶限速**：基于 `golang.org/x/time/rate` 实现，可通过参数限制下载速度，防止带宽被瞬间打满。
+- **🛡️ 优雅退出**：基于 `context` 拦截 `Ctrl+C` 信号。中断时安全关闭文件句柄，绝不产生损坏的“半截文件”。
+- **📊 实时进度条**：支持多任务并发时的实时进度、下载速度与 ETA 显示。
+- **🔒 数据安全防覆盖**：采用 `.part` 临时文件 + `os.Rename` 原子重命名机制。下载彻底成功前，绝对不破坏用户原有的同名文件。
 
 ## 🚀 快速开始
 
-### 编译与运行
+### 1. 编译
+
+```bash
+git clone https://github.com/Mark-xsx/go-downloader.git
+cd go-downloader
+go mod tidy
+go build -o downloader
+```
+
+### 2. 使用示例
 
 ```bash
 # 下载单个文件
-go run . -u "https://example.com/file.zip"
+./downloader -u "https://example.com/file.zip"
 
-# 下载多个文件（用英文逗号分隔），并指定保存目录
-go run . -u "https://a.com/1.png,https://b.com/2.png" -d "./downloads"
+# 下载多个文件（用英文逗号分隔），保存到指定目录，最大并发数 5
+./downloader -u "https://a.com/1.png,https://b.com/2.png" -d "./downloads" -c 5
 
-# 自定义并发数（默认 3）
-go run . -u "https://a.com,https://b.com" -c 5
+# 限制下载速度为 500 KB/s
+./downloader -u "https://example.com/bigfile.iso" -rate 500
+```
+
+## ⚙️ 命令行参数
+
+| 参数 | 简写 | 默认值 | 说明 |
+| :--- | :--- | :--- | :--- |
+| `-u` | | (必填) | 要下载的 URL，多个用逗号分隔 |
+| `-d` | | `.` | 文件保存的目录 |
+| `-c` | | `3` | 最大并发下载数（Worker 数量） |
+| `-rate` | | `0` | 下载限速（KB/s），`0` 表示不限速 |
 
 ## ⚡ 性能基准测试 (Benchmark)
 
@@ -34,3 +56,22 @@ go run . -u "https://a.com,https://b.com" -c 5
 | `-c 3` | 并发下载 | **1.73s** | **提升约 2.47 倍** |
 
 > **结论**：在存在网络延迟（I/O 阻塞）的场景下，并发下载能极大缩短整体耗时。耗时取决于最慢的那个请求，而非所有请求之和。
+
+## 🛡️ 竞态与健壮性验证
+
+本项目严格遵守并发安全规范，拒绝数据竞争。
+
+```bash
+# 运行竞态检测
+go run -race . -u "https://example.com,https://httpbin.org/image/png" -c 3
+# 输出结果：没有任何 DATA RACE 警告
+```
+
+- **结果收集无锁化**：通过预分配 `[]Result` 切片，各 Worker 按索引写入，利用内存地址隔离实现零锁无竞争。
+- **双重防损坏保护**：写盘失败时只删除 `.part` 临时文件；落盘时显式检查 `f.Close()` 错误，确保数据真实刷入磁盘后再进行 `Rename`。
+
+## 💡 架构设计亮点
+
+1. **背压机制 (Backpressure)**：任务通道使用无缓冲 `channel`。当下游 Worker 处理不过来时，上游派发协程会自动阻塞，防止海量任务堆积导致内存溢出。
+2. **平滑限速**：动态计算单次读取字节数（`readLen`），确保每次向令牌桶申请的令牌数不超过桶容量（Burst），避免了 `rate: Wait exceeds limiter's burst` 的报错。
+3. **优雅退出与断点续传联动**：按下 `Ctrl+C` 时，`context` 取消信号会传递到文件读写循环，文件被安全关闭。下次启动时，代码自动读取 `.part` 文件大小，无缝接续下载。
