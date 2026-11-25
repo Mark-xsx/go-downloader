@@ -1,0 +1,7 @@
+# 下载产物
+*.part
+out_*
+downloads/
+# 编译产物
+downloader
+*.exe
